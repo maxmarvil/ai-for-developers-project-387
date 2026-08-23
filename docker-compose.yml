@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: booking_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: booking
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - booking_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: booking_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - booking_network
+
+  adminer:
+    image: adminer
+    container_name: booking_adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    networks:
+      - booking_network
+    depends_on:
+      - postgres
+
+  # Production preview: the same image that is deployed to the PaaS.
+  # Run with: docker compose --profile prod up app
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: booking_app
+    restart: unless-stopped
+    profiles: ["prod"]
+    environment:
+      PORT: 8000
+      APP_ENV: production
+      APP_DEBUG: "false"
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: booking
+      DB_USERNAME: booking
+      DB_PASSWORD: booking
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: sync
+    ports:
+      - "8000:8000"
+    networks:
+      - booking_network
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  postgres_data:
+
+networks:
+  booking_network:
+    driver: bridge

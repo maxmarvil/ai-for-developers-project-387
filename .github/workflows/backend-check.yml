@@ -1,0 +1,57 @@
+name: Backend Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, pdo, pdo_pgsql, pgsql, redis, xml, zip, intl, bcmath
+          coverage: none
+
+      - name: Copy .env.testing
+        run: cp ../.env.testing .env.testing
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Generate app key
+        run: php artisan key:generate --env=testing --ansi
+
+      - name: Run Pint
+        run: ./vendor/bin/pint --test
+
+      - name: Run Larastan
+        run: ./vendor/bin/phpstan analyse --memory-limit=512M --no-progress
+
+      - name: Run Pest
+        run: ./vendor/bin/pest --no-coverage
+        env:
+          REDIS_HOST: 127.0.0.1
