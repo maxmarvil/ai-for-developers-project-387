@@ -34,15 +34,17 @@ services:
     depends_on:
       - postgres
 
-  # Production preview: the same image that is deployed to the PaaS.
-  # Run with: docker compose --profile prod up app
+  # The all-in-one backend (Nginx + PHP-FPM) that serves the Laravel API,
+  # Filament admin and the built SPA. Started by the default stack so
+  # `make up` brings the whole application up. The same image is deployed
+  # to the PaaS; an explicit production preview can still be run with:
+  #   docker compose up app
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: booking_app
     restart: unless-stopped
-    profiles: ["prod"]
     environment:
       PORT: 8000
       APP_ENV: production
@@ -60,11 +62,11 @@ services:
       QUEUE_CONNECTION: sync
     ports:
       - "8000:8000"
-    networks:
-      - booking_network
     depends_on:
       - postgres
       - redis
+    networks:
+      - booking_network
 
 volumes:
   postgres_data:

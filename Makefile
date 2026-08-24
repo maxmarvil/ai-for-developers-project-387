@@ -7,6 +7,10 @@
 
 up:
 	docker compose up -d
+	@echo "Stack is up:"
+	@echo "  Frontend (SPA) ... http://localhost:8000"
+	@echo "  Admin (Filament) . http://localhost:8000/admin"
+	@echo "  Adminer (DB GUI) . http://localhost:8080"
 
 down:
 	docker compose down
@@ -25,8 +29,7 @@ frontend-install:
 
 dev:
 	$(MAKE) up
-	@echo "Infra is up: postgres :5432, redis :6379, adminer :8080"
-	@echo "Run 'make backend-dev' and 'make frontend-dev' in separate terminals"
+	@echo "For hot-reload, run 'make backend-dev' and 'make frontend-dev' in separate terminals"
 
 backend-dev:
 	cd backend && php artisan serve
@@ -87,7 +90,7 @@ tinker:
 # ---------- Production preview ----------
 
 prod-build:
-	docker compose --profile prod build app
+	docker compose build app
 
 prod-preview:
-	docker compose --profile prod up app
+	docker compose up app
