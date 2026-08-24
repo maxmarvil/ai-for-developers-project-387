@@ -1,0 +1,43 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+# Conductor local project overrides for the Booking Calendar repo.
+# Layered on top of any shared .conductor/settings.toml (none committed yet).
+# This file is gitignored; it only affects this machine.
+
+[scripts]
+# Prepare a fresh workspace: install PHP + Node deps, compile the TypeSpec
+# API contract, generate frontend types, and bootstrap backend .env.
+setup = """
+composer install --working-dir=backend --no-interaction --prefer-dist
+npm install --prefix api
+npm install --prefix web
+npm --prefix web run api:gen
+if [ ! -f backend/.env ]; then cp backend/.env.example backend/.env; fi
+php artisan key:generate --ansi --working-dir=backend || true
+"""
+
+# The docker-compose stack uses fixed host ports (8000/5432/8080) and fixed
+# container names, so only one stack can run per host -> nonconcurrent.
+run_mode = "nonconcurrent"
+
+# Tear down the docker stack before archiving. Safe no-op if not running.
+archive = "docker compose down"
+
+# Full stack: postgres + redis + adminer + the all-in-one app container.
+# Foreground `up` streams logs so Conductor can manage the process group.
+[scripts.run.stack]
+command = "docker compose up"
+default = true
+icon = "server"
+
+# Frontend HMR only (Vite). Talks to the Laravel API running in the stack.
+# Uses CONDUCTOR_PORT so multiple workspaces can each run their own Vite.
+[scripts.run.web]
+command = "npm --prefix web run dev -- --port $CONDUCTOR_PORT"
+icon = "play"
+
+# Backend dev server on the host (needs the docker postgres/redis running).
+# Uses CONDUCTOR_PORT+1 to avoid clashing with the Vite run script.
+[scripts.run.backend]
+command = "cd backend && php artisan serve --port $((CONDUCTOR_PORT+1))"
+icon = "square-terminal"
