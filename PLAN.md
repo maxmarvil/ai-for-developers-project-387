@@ -143,6 +143,204 @@
 
 ---
 
+## 6. Комментарий администратора при отказе в бронировании
+
+**Проблема.** При отклонении брони (action `cancel` в `BookingResource.php:108-116`) администратор не может оставить пояснение причины отказа. Гостевой `comment` перетирать нельзя — это пользовательский ввод.
+
+**Что сделать.**
+- **DB-миграция** `2026_08_25_000003_add_cancellation_reason_to_bookings.php`:
+  ```php
+  Schema::table('bookings', function (Blueprint $table) {
+      $table->text('cancellation_reason')->nullable()->after('comment');
+  });
+  ```
+- **Model** (`app/Models/Booking.php`): добавить `cancellation_reason` в `$fillable`.
+- **Filament** (`app/Filament/Resources/BookingResource.php`):
+  - У action `cancel` добавить форму с `Textarea::make('cancellation_reason')->label('Причина отказа')->nullable()->maxLength(1000)`:
+    ```php
+    Action::make('cancel')
+        ->label('Отменить')
+        ->icon('heroicon-o-x-mark')
+        ->color('danger')
+        ->requiresConfirmation()
+        ->visible(fn (Booking $record): bool => ! $record->isCancelled())
+        ->form([
+            Textarea::make('cancellation_reason')
+                ->label('Причина отказа')
+                ->nullable()
+                ->maxLength(1000),
+        ])
+        ->action(function (Booking $record, array $data): void {
+            $record->update([
+                'status' => BookingStatus::CANCELLED,
+                'cancellation_reason' => $data['cancellation_reason'] ?? null,
+            ]);
+        });
+    ```
+  - Добавить колонку `TextColumn::make('cancellation_reason')->label('Причина отказа')->wrap()->limit(50)->toggleable()` в таблицу.
+  - В форме редактирования — `Textarea::make('cancellation_reason')->disabled()` (только для чтения, журнал отказов).
+- **API-контракт** (`api/models/admin.tsp`):
+  - В `UpdateBookingStatusRequest`:
+    ```tsp
+    model UpdateBookingStatusRequest {
+      status: BookingStatus;
+      /** Необязательное пояснение причины отказа (заполняется только при status = cancelled). */
+      cancellation_reason?: string | null;
+    }
+    ```
+  - В `AdminBooking` добавить `cancellation_reason: string | null;`
+  - Перекомпилировать OpenAPI → `api/openapi.v1.json` → регенерировать `web/src/api/schema.d.ts`.
+- **Backend controller/service** (`AdminBookingController` или эквивалент): в `updateStatus`:
+  - Валидация: `'cancellation_reason' => 'nullable|string|max:1000'`.
+  - Сохранение: при `status=cancelled` писать `cancellation_reason`; при любом другом статусе — обнулять `cancellation_reason` до `null` (чистое состояние).
+- **Гостевая часть:** без изменений (причина не показывается посетителю).
+- **Тесты Pest:**
+  - Отказ с причиной → сохраняется в БД.
+  - Отказ без причины → поле `null`.
+  - Смена статуса с `cancelled` на `pending`/`confirmed` → `cancellation_reason` обнуляется.
+  - Длина > 1000 символов → validation error.
+
+**Файлы:**
+- новый `backend/database/migrations/2026_08_25_000003_add_cancellation_reason_to_bookings.php`
+- правка `backend/app/Models/Booking.php` (`$fillable`)
+- правка `backend/app/Filament/Resources/BookingResource.php` (action `cancel`, колонка, edit-форма)
+- правка `backend/app/Http/Controllers/Api/AdminBookingController.php` (или эквивалент — найти PATCH-эндпоинт)
+- правка `api/models/admin.tsp` (`UpdateBookingStatusRequest`, `AdminBooking`)
+- регенерация `api/openapi.v1.json` + `web/src/api/schema.d.ts`
+- новый/обновлённый тест в `backend/tests/Feature/` (или Pest, по конвенции проекта)
+
+**Проверка:** `php artisan migrate`; в админке отменить бронь с текстом причины → колонка показывает причину; `./vendor/bin/pest` зелёный; `npm run typecheck` в `web/` зелёный (после регенерации типов).
+
+**Коммит:** `feat(admin): optional cancellation reason when rejecting booking`
+
+---
+
+## 7. Групповые встречи до 3 гостей
+
+**Проблема.** Сейчас одна бронь = один гость (`bookings.guest_id`). Нет возможности оформить встречу с несколькими участниками (первичный букер + до 2 коллег). Нужно добавить поддержку до 3 участников на одно бронирование, где слот занимается один раз (одно мероприятие).
+
+**Зафиксированные решения:**
+- Вариант A: одно мероприятие, слот занимается 1 раз (не 3).
+- Лимит 2ч (BR-1) применяется только к первичному букеру; доп. участники не учитываются.
+- Доп. участникам нужен полный набор полей: имя, email, телефон.
+- Хранение: pivot-таблица `booking_participants` (нормализованно, queryable).
+- UI: кнопка «Добавить участника» в `GuestForm`, до 2 доп. строк.
+- В `BookingResource` — показывать список участников (Relation Manager).
+- Отмена брони отменяет для всех участников (одно мероприятие).
+
+### Что сделать
+
+**DB-миграция** `2026_08_25_000004_create_booking_participants_table.php`:
+```php
+Schema::create('booking_participants', function (Blueprint $table) {
+    $table->id();
+    $table->foreignId('booking_id')->constrained()->cascadeOnDelete();
+    $table->foreignId('guest_id')->constrained()->cascadeOnDelete();
+    $table->enum('role', ['primary', 'secondary'])->default('secondary');
+    $table->timestamps();
+    $table->unique(['booking_id', 'guest_id']); // один гость не может быть дважды в одной брони
+    $table->index('guest_id');
+});
+```
+- Первичный букер дублируется в pivot как `role='primary'` (для queryable связи), а также остаётся в `bookings.guest_id` (backward compat).
+- Доп. участники (до 2) — `role='secondary'`.
+
+**Models:**
+- `Booking`: добавить relation `participants(): HasMany(BookingParticipant::class)`. Добавить `participants` в `$with` (eager load) или явно загружать где нужно.
+- Новый `BookingParticipant` model (`$fillable`: `booking_id`, `guest_id`, `role`; casts для `role`).
+- `Guest`: добавить relation `participatingBookings(): BelongsToMany(Booking::class)->using(BookingParticipant::class)->withPivot('role')`.
+
+**Service** (`BookingService::create`):
+- Сигнатура: вместо `array $guestData` принимать `array $primaryGuest` + `array $additionalGuests` (по умолчанию `[]`).
+- Upsert'ить каждого участника через `GuestService::firstOrCreateByEmail` (полный набор полей: name, email, phone).
+- Валидация: всего участников (primary + additional) ≤ 3. Если > 3 → `ErrorCode` `TOO_MANY_PARTICIPANTS` (новый код) или переиспользовать `VALIDATION_ERROR`.
+- В цикле создания `Booking::create(...)` для каждого слота — после создания строки бронирования — создавать pivot-записи: primary participant + все secondary.
+- Лимит 2ч (BR-1) проверять только для primary (без изменений в логике, просто не расширять на secondary).
+
+**API-контракт** (`api/models/public.tsp`):
+- `CreateBookingRequest`:
+  ```tsp
+  model CreateBookingRequest {
+    event_type_id: int32;
+    date: CalendarDate;
+    guest: GuestInput;                          // primary
+    @maxItems(2) additional_guests?: GuestInput[];  // up to 2 secondary
+    @minItems(1) slots: BookingSlotInput[];
+  }
+  ```
+- Добавить `ErrorCode` `TOO_MANY_PARTICIPANTS` в `api/models/common.tsp` (или переиспользовать `VALIDATION_ERROR`).
+- `CreateBookingResponse` — без изменений (`booking_group_id` + `status`).
+- Перекомпилировать OpenAPI → `api/openapi.v1.json` → регенерировать `web/src/api/schema.d.ts`.
+
+**Backend controller/request:**
+- `StoreBookingRequest`: добавить правила валидации:
+  ```php
+  'additional_guests'           => ['nullable', 'array', 'max:2'],
+  'additional_guests.*.name'    => ['required', 'string', 'max:255'],
+  'additional_guests.*.email'  => ['required', 'email', 'max:255'],
+  'additional_guests.*.phone'  => ['required', 'string', 'regex:/^\+7 \(\d{3}\) \d{3}-\d{2}-\d{2}$/'],
+  ```
+- `BookingController::store`: передать `additionalGuests` в `BookingService::create`.
+
+**Frontend** (`web/src/features/booking/GuestForm.tsx`):
+- Добавить кнопку «Добавить участника» (до 2 раз).
+- Состояние: `additionalGuests: GuestInput[]` (массив, max 2).
+- Каждая доп. строка: 3 поля (имя, email, телефон) с валидацией (тот же `isValidEmail` / `isValidPhone`).
+- Кнопка «Удалить участника» на каждой доп. строке.
+- В payload `useCreateBooking`: передать `additional_guests` (если есть).
+- `localStorage`: сохранять только primary гостя (FR-11), доп. участников не персистить.
+
+**Filament** (`BookingResource`):
+- Relation Manager `ParticipantsRelationManager`:
+  - Таблица: `guest.email`, `guest.name`, `guest.phone`, `role` (primary/secondary).
+  - Только для чтения (управление участниками идёт через отмену/пересоздание брони).
+- Колонка в основном списке броней: `TextColumn::make('participants_count')->counts('participants')->label('Участников')` (число, для быстрого обзора).
+- При отмене брони (action `cancel`) — ничего доп. не делать: pivot cascade-deletes при удалении брони; при смене статуса на `cancelled` pivot остаётся (история), но слот освобождается через существующий `BookingObserver`.
+
+**Бизнес-правила (обновить в REQUIREMENTS/CONTEXT при необходимости):**
+- Слот занимается 1 раз независимо от числа участников (1-3).
+- Лимит 2ч применяется только к primary букеру.
+- Все участники делят один `booking_group_id` и один статус (отмена = отмена для всех).
+- Доп. участник не может быть тем же email, что и primary (unique constraint на pivot + валидация).
+
+**Тесты Pest:**
+- Групповая бронь на 3 гостей (1 primary + 2 secondary) → создаётся, pivot заполнен.
+- Превышение 3 участников (1 + 3) → validation error.
+- Дублирующийся email в доп. участниках и primary → ошибка.
+- Лимит 2ч не увеличивается для secondary (secondary делает свою бронь в тот же день → не блокируется).
+- Отмена групповой брони → слот освобождается, pivot остаётся (cascade только при hard delete).
+- UI E2E (опционально): добавление/удаление участника в форме.
+
+### Файлы
+- новый `backend/database/migrations/2026_08_25_000004_create_booking_participants_table.php`
+- новый `backend/app/Models/BookingParticipant.php`
+- правка `backend/app/Models/Booking.php` (relation `participants`)
+- правка `backend/app/Models/Guest.php` (relation `participatingBookings`)
+- правка `backend/app/Services/BookingService.php` (метод `create`)
+- правка `backend/app/Http/Controllers/Api/BookingController.php`
+- правка `backend/app/Http/Requests/StoreBookingRequest.php`
+- правка `api/models/public.tsp` (`CreateBookingRequest`, `additional_guests`)
+- правка `api/models/common.tsp` (новый `ErrorCode` если добавляем)
+- регенерация `api/openapi.v1.json` + `web/src/api/schema.d.ts`
+- правка `web/src/features/booking/GuestForm.tsx` (UI участников)
+- правка `web/src/features/booking/BookingPage.tsx` (передача `additional_guests` в payload)
+- новый `backend/app/Filament/Resources/BookingResource/RelationManagers/ParticipantsRelationManager.php`
+- правка `backend/app/Filament/Resources/BookingResource.php` (подключение RM, колонка)
+- новые тесты в `backend/tests/Feature/` (или Pest по конвенции проекта)
+- (опционально) `web/e2e/` — E2E сценарий добавления участника
+
+### Проверка
+- `php artisan migrate`; в админке создать групповую бронь на 3 участников → pivot заполнен, RM показывает список.
+- `./vendor/bin/pest` зелёный.
+- `npm run typecheck` в `web/` зелёный (после регенерации типов).
+- `npm run lint` зелёный.
+- E2E (если добавлен): выбор 1 слота → добавление 2 участников → отправка → confirmation показывает `booking_group_id`.
+
+### Коммит
+`feat(api): support group bookings with up to 3 participants`
+
+---
+
 ## Общие параметры
 
 - **Порядок выполнения:** пункты независимы, можно делать параллельно. Рекомендую: 1 → 3 → 4 → 2 → 5 (DB-миграция первой, чтобы остальные тесты на свежих индексах шли).
@@ -156,7 +354,10 @@
   3. `fix(api): correct slot cache tags for proper invalidation`
   4. `perf(api): defer and batch slot cache invalidation on booking`
   5. `perf(docker): use redis queue and add worker to supervisor`
-- **Файлы, которые НЕ затрагиваем:** фронтенд (`web/`), OpenAPI-контракт (`api/`), сидеры.
+  6. `feat(admin): optional cancellation reason when rejecting booking`
+  7. `feat(api): support group bookings with up to 3 participants`
+- **Файлы, которые НЕ затрагиваем:** OpenAPI-контракт `api/` правится только в п.6 и п.7, сидеры.
+- **Порядок выполнения пунктов 6-7 (фичи):** после perf-пунктов 1-5; п.6 и п.7 независимы друг от друга, но п.7 правит `StoreBookingRequest`/`BookingController` — проверить, что п.6 (правка `AdminBookingController`) не конфликтует.
 
 ---
 
@@ -164,5 +365,17 @@
 
 1. Обычный индекс `index(['date', 'status'])` — без partial индексов.
 2. Миграция `failed_jobs` добавляется в п.5.
-3. `BookingObserver::created` остаётся пустым методом (observer не разрегистрируется).
+3. `BookingObserver::created` остаётся пустым методом (observer не разегистрируется).
 4. `opcache.preload` включается в п.2 вместе с JIT.
+5. Поле причины отказа: имя `cancellation_reason`, тип `text`, nullable, `max:1000` на уровне валидации.
+6. Причина отказа видна только администратору (гостю не показываем).
+7. `cancellation_reason` обнуляется при любой смене статуса на не-`cancelled`.
+8. В Filament edit-форме поле `cancellation_reason` только для чтения (`disabled()`).
+9. Поле причины отказа необязательное (nullable) на уровне UI и API.
+10. Групповая встреча: слот занимается 1 раз (одно мероприятие), не по числу участников.
+11. Лимит 2ч (BR-1) для групповых встреч применяется только к primary букеру; secondary не учитываются.
+12. Доп. участникам нужен полный набор полей (имя, email, телефон); хранение — pivot-таблица `booking_participants`.
+13. Первичный букер дублируется в pivot как `role='primary'` + остаётся в `bookings.guest_id` (backward compat).
+14. В `GuestForm` — кнопка «Добавить участника» (до 2 доп. строк); `localStorage` только для primary.
+15. В `BookingResource` — Relation Manager для участников (только чтение) + колонка с количеством.
+16. Отмена групповой брони = отмена для всех участников; pivot cascade-deletes при hard delete.
