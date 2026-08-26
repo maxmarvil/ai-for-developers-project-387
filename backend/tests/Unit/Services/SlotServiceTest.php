@@ -171,3 +171,23 @@ it('ignores soft deleted bookings', function () {
 
     expect($slots[0]['status'])->toBe(SlotStatus::FREE->value);
 });
+
+it('clears cached slots when a closed exception is added for that date', function () {
+    $eventType = EventType::factory()->create(['duration_minutes' => 30]);
+    AvailabilityRule::factory()->create([
+        'weekday' => Carbon::parse('2026-08-19')->format('w'),
+        'start_time' => '09:00:00',
+        'end_time' => '10:00:00',
+    ]);
+
+    $service = new SlotService;
+
+    expect($service->generate($eventType, Carbon::parse('2026-08-19')))
+        ->toHaveCount(2);
+
+    AvailabilityException::factory()->onDate('2026-08-19')->create();
+
+    $slots = $service->generate($eventType, Carbon::parse('2026-08-19'));
+
+    expect($slots)->toBeEmpty();
+});

@@ -8,6 +8,7 @@ use App\Enums\BookingStatus;
 use App\Enums\ErrorCode;
 use App\Enums\SlotStatus;
 use App\Exceptions\BookingException;
+use App\Models\AvailabilityException;
 use App\Models\Booking;
 use App\Models\EventType;
 use App\Models\Guest;
@@ -49,6 +50,8 @@ final class BookingService
 
         try {
             return DB::transaction(function () use ($eventType, $date, $dateCarbon, $startTimes, $guestData, $comment) {
+                $this->ensureDateNotClosed($date);
+
                 $slots = $this->slotService->generate($eventType, $dateCarbon);
                 $duration = $eventType->duration_minutes;
 
@@ -173,6 +176,25 @@ final class BookingService
                     'One or more requested slots are already taken.',
                 );
             }
+        }
+    }
+
+    /**
+     * Defense-in-depth: verify the date is not closed for booking using a
+     * fresh database lookup, independent of the (potentially stale) slot cache.
+     */
+    private function ensureDateNotClosed(string $date): void
+    {
+        $isClosed = AvailabilityException::query()
+            ->whereDate('date', $date)
+            ->where('is_closed', true)
+            ->exists();
+
+        if ($isClosed) {
+            throw new BookingException(
+                ErrorCode::SLOT_UNAVAILABLE,
+                'The requested date is closed for booking.',
+            );
         }
     }
 

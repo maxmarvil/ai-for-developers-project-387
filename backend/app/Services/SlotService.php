@@ -29,10 +29,11 @@ final class SlotService
         }
 
         $dateString = $date->format('Y-m-d');
-        $tag = $this->cacheTag($eventType->id, $dateString);
+        $cacheKey = $this->cacheTag($eventType->id, $dateString);
+        $tags = $this->cacheTags($eventType->id, $dateString);
 
-        return Cache::tags([$tag])->remember(
-            $tag,
+        return Cache::tags($tags)->remember(
+            $cacheKey,
             self::CACHE_TTL_SECONDS,
             function () use ($eventType, $date, $dateString): array {
                 $exception = AvailabilityException::query()
@@ -81,7 +82,7 @@ final class SlotService
 
     public function invalidate(EventType $eventType, string $date): void
     {
-        Cache::tags([$this->cacheTag($eventType->id, $date)])->flush();
+        Cache::tags($this->cacheTags($eventType->id, $date))->flush();
     }
 
     public function invalidateForEventType(EventType $eventType): void
@@ -97,6 +98,18 @@ final class SlotService
     private function cacheTag(int $eventTypeId, string $date): string
     {
         return "slots:{$eventTypeId}:{$date}";
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function cacheTags(int $eventTypeId, string $date): array
+    {
+        return [
+            'slots',
+            "slots:{$eventTypeId}",
+            "slots:{$eventTypeId}:{$date}",
+        ];
     }
 
     private function roundEndTimeUp(Carbon $endTime): Carbon
