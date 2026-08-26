@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Enums\BookingStatus;
 use App\Enums\ErrorCode;
 use App\Exceptions\BookingException;
+use App\Models\AvailabilityException;
 use App\Models\AvailabilityRule;
 use App\Models\Booking;
 use App\Models\EventType;
@@ -14,6 +15,7 @@ use App\Services\GuestService;
 use App\Services\SlotService;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 beforeEach(function () {
     Cache::flush();
@@ -184,4 +186,69 @@ it('reuses an existing guest', function () {
     );
 
     expect(Guest::count())->toBe(1);
+});
+
+it('rejects a booking on a closed date even when the slot cache is stale', function () {
+    $eventType = EventType::factory()->duration30()->create();
+    AvailabilityRule::factory()->create([
+        'weekday' => Carbon::parse('2026-08-19')->format('w'),
+        'start_time' => '09:00:00',
+        'end_time' => '10:00:00',
+    ]);
+
+    $slotService = new SlotService;
+
+    $slotService->generate($eventType, Carbon::parse('2026-08-19'));
+
+    DB::table('availability_exceptions')->insert([
+        'date' => '2026-08-19',
+        'is_closed' => true,
+        'start_time' => null,
+        'end_time' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $service = new BookingService(new GuestService, $slotService);
+
+    $thrown = null;
+
+    try {
+        $service->create(
+            $eventType,
+            '2026-08-19',
+            ['09:00'],
+            ['email' => 'ivan@example.com', 'name' => 'Ivan', 'phone' => '+7 (999) 000-00-00'],
+        );
+    } catch (BookingException $e) {
+        $thrown = $e;
+    }
+
+    expect($thrown)->not->toBeNull()
+        ->and($thrown->getErrorCode())->toBe(ErrorCode::SLOT_UNAVAILABLE)
+        ->and(Booking::count())->toBe(0);
+});
+
+it('still allows a booking once the closed exception is removed', function () {
+    $eventType = EventType::factory()->duration30()->create();
+    AvailabilityRule::factory()->create([
+        'weekday' => Carbon::parse('2026-08-19')->format('w'),
+        'start_time' => '09:00:00',
+        'end_time' => '10:00:00',
+    ]);
+
+    $service = makeBookingService();
+
+    $exception = AvailabilityException::factory()->onDate('2026-08-19')->create();
+    $exception->delete();
+
+    $result = $service->create(
+        $eventType,
+        '2026-08-19',
+        ['09:00'],
+        ['email' => 'ivan@example.com', 'name' => 'Ivan', 'phone' => '+7 (999) 000-00-00'],
+    );
+
+    expect($result['status'])->toBe(BookingStatus::PENDING->value)
+        ->and(Booking::count())->toBe(1);
 });
