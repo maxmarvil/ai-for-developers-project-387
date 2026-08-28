@@ -9,8 +9,11 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('bookings', function (Blueprint $table) {
+            // Ускоряет выборку броней конкретного гостя и проверку лимита 2ч (BR-1) в BookingService.
             $table->index('guest_id');
+            // Ускоряет разрешение статуса слота по временному диапазону в SlotService::resolveSlotStatus.
             $table->index('starts_at');
+            // Составной индекс для фильтров Filament по дате и статусу, а также запросов доступности слотов.
             $table->index(['date', 'status'], 'bookings_date_status_idx');
         });
     }
