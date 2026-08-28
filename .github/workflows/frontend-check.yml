@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+     - cron: "0 2 * * *"
+     timezone: "Europe/Moscow"
 
 jobs:
   frontend:
@@ -60,3 +63,41 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  lighthouse_schedule:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run lighthouse
+        run: |
+          npx lighthouse https://ctclove.ru/ \
+            --output=json \
+            --output-path=./lighthouse-report.json \
+            --chrome-flags="--headless=new"
+      - name: Run opencode review
+        uses: anomalyco/opencode/github@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: opencode-go/glm-5.2
+          prompt: |
+            Read ./lighthouse-report.json and extract LCP, CLS, INP, FCP, TBT.
+            Compare them with docs/performance-baseline.md.
+            If the baseline file is missing, create it with the current measured values and stop.
+            For any metric that degraded by more than 10% versus the baseline,
+            identify likely culprits in recent commits and create a GitHub issue
+            with specific recommendations.
