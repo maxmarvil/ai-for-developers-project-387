@@ -1,29 +1,6 @@
 # PLAN.md — Улучшения производительности (пакет 1 из 5)
 
-## 1. Индексы на `bookings`
-
-**Проблема.** На таблице `bookings` есть только `booking_group_id` и unique `(event_type_id, date, start_time)`. Колонки `guest_id`, `status`, `date` (как самостоятельный предикат) не проиндексированы → seq scan на каждом запросе броней гостя, проверке лимита 2ч, фильтрах Filament.
-
-**Что сделать.**
-- Создать миграцию `database/migrations/2026_08_25_000001_add_bookings_performance_indexes.php`:
-  ```php
-  Schema::table('bookings', function (Blueprint $table) {
-      $table->index('guest_id');
-      $table->index('starts_at');
-      $table->index(['date', 'status'], 'bookings_date_status_idx');
-  });
-  ```
-- Использовать обычные индексы (не partial).
-- Миграция должна быть reversible (`down` удаляет индексы).
-
-**Файлы:**
-- новый `backend/database/migrations/2026_08_25_000001_add_bookings_performance_indexes.php`
-
-**Проверка:** `EXPLAIN ANALYZE` на запросах из `BookingService::ensureDailyLimitNotExceeded` и `SlotService::resolveSlotStatus` до/после; `php artisan migrate` + `php artisan migrate:rollback` проходит; `./vendor/bin/pest` зелёный.
-
----
-
-## 2. OPcache + JIT + preload в Docker-образе
+## 1. OPcache + JIT + preload в Docker-образе
 
 **Проблема.** `Dockerfile:42` ставит `opcache`, но конфига нет: дефолты `validate_timestamps=1`, JIT выключен, preload не настроен. В prod-образе код не меняется после build — каждый запрос перепроверяет файлы и не получает JIT-ускорения.
 
@@ -65,7 +42,7 @@
 
 ---
 
-## 3. Фикс тегов кэша слотов
+## 2. Фикс тегов кэша слотов
 
 **Проблема.** В `SlotService::generate` запись кэшируется под тегом `slots:{$id}:{$date}`. Но `invalidateForEventType` фушет `slots:{$id}`, а `invalidateAll` — `slots`. Ни один из этих тегов не прикреплён к записям → правки `EventType`/`AvailabilityRule`/`AvailabilityException` не инвалидируют кэш, stale до 600с.
 
@@ -90,7 +67,7 @@
 
 ---
 
-## 4. Дефер инвалидации кэша броней + батч
+## 3. Дефер инвалидации кэша броней + батч
 
 **Проблема.** `BookingService::create` в цикле вызывает `Booking::create(...)` N раз внутри `DB::Transaction`. Каждый `created` ивент → `BookingObserver` → `SlotService::invalidate(...)` → Redis FLUSH — N раз, внутри незакоммиченной транзакции. При rollback кэш уже инвалидирован (но данные не записаны) — лишние флуши.
 
@@ -109,7 +86,7 @@
 
 ---
 
-## 5. `QUEUE_CONNECTION: redis` + worker в supervisor + failed_jobs
+## 4. `QUEUE_CONNECTION: redis` + worker в supervisor + failed_jobs
 
 **Проблема.** `docker-compose.yml:62` жёстко ставит `QUEUE_CONNECTION: sync` (перекрывая `.env`). Любой будущий job заблокирует HTTP-запрос. В `docker/supervisord.conf` нет `queue:work` программы — даже с redis-очередью jobs не обработались бы. Миграция `failed_jobs` отсутствует.
 
@@ -143,7 +120,7 @@
 
 ---
 
-## 6. Комментарий администратора при отказе в бронировании
+## 5. Комментарий администратора при отказе в бронировании
 
 **Проблема.** При отклонении брони (action `cancel` в `BookingResource.php:108-116`) администратор не может оставить пояснение причины отказа. Гостевой `comment` перетирать нельзя — это пользовательский ввод.
 
@@ -215,7 +192,7 @@
 
 ---
 
-## 7. Групповые встречи до 3 гостей
+## 6. Групповые встречи до 3 гостей
 
 **Проблема.** Сейчас одна бронь = один гость (`bookings.guest_id`). Нет возможности оформить встречу с несколькими участниками (первичный букер + до 2 коллег). Нужно добавить поддержку до 3 участников на одно бронирование, где слот занимается один раз (одно мероприятие).
 
@@ -343,39 +320,37 @@ Schema::create('booking_participants', function (Blueprint $table) {
 
 ## Общие параметры
 
-- **Порядок выполнения:** пункты независимы, можно делать параллельно. Рекомендую: 1 → 3 → 4 → 2 → 5 (DB-миграция первой, чтобы остальные тесты на свежих индексах шли).
+- **Порядок выполнения:** пункты независимы, можно делать параллельно. Рекомендую: 2 → 3 → 1 → 4 (слот-кэш и батч-инвалидация — быстрые правки, OPcache/preload и очередь — инфраструктура).
 - **Тестирование после каждого пункта:**
   - `cd backend && ./vendor/bin/pest --no-coverage`
   - `cd backend && ./vendor/bin/pint --test`
   - `cd backend && ./vendor/bin/phpstan analyse --memory-limit=512M --no-progress`
 - **Коммиты** (Conventional Commits по AGENTS.md):
-  1. `perf(db): add performance indexes on bookings`
-  2. `perf(docker): enable opcache jit and preload for production`
-  3. `fix(api): correct slot cache tags for proper invalidation`
-  4. `perf(api): defer and batch slot cache invalidation on booking`
-  5. `perf(docker): use redis queue and add worker to supervisor`
-  6. `feat(admin): optional cancellation reason when rejecting booking`
-  7. `feat(api): support group bookings with up to 3 participants`
-- **Файлы, которые НЕ затрагиваем:** OpenAPI-контракт `api/` правится только в п.6 и п.7, сидеры.
-- **Порядок выполнения пунктов 6-7 (фичи):** после perf-пунктов 1-5; п.6 и п.7 независимы друг от друга, но п.7 правит `StoreBookingRequest`/`BookingController` — проверить, что п.6 (правка `AdminBookingController`) не конфликтует.
+  1. `perf(docker): enable opcache jit and preload for production`
+  2. `fix(api): correct slot cache tags for proper invalidation`
+  3. `perf(api): defer and batch slot cache invalidation on booking`
+  4. `perf(docker): use redis queue and add worker to supervisor`
+  5. `feat(admin): optional cancellation reason when rejecting booking`
+  6. `feat(api): support group bookings with up to 3 participants`
+- **Файлы, которые НЕ затрагиваем:** OpenAPI-контракт `api/` правится только в п.5 и п.6, сидеры.
+- **Порядок выполнения пунктов 5-6 (фичи):** после perf-пунктов 1-4; п.5 и п.6 независимы друг от друга, но п.6 правит `StoreBookingRequest`/`BookingController` — проверить, что п.5 (правка `AdminBookingController`) не конфликтует.
 
 ---
 
 ## Зафиксированные решения
 
-1. Обычный индекс `index(['date', 'status'])` — без partial индексов.
-2. Миграция `failed_jobs` добавляется в п.5.
-3. `BookingObserver::created` остаётся пустым методом (observer не разегистрируется).
-4. `opcache.preload` включается в п.2 вместе с JIT.
-5. Поле причины отказа: имя `cancellation_reason`, тип `text`, nullable, `max:1000` на уровне валидации.
-6. Причина отказа видна только администратору (гостю не показываем).
-7. `cancellation_reason` обнуляется при любой смене статуса на не-`cancelled`.
-8. В Filament edit-форме поле `cancellation_reason` только для чтения (`disabled()`).
-9. Поле причины отказа необязательное (nullable) на уровне UI и API.
-10. Групповая встреча: слот занимается 1 раз (одно мероприятие), не по числу участников.
-11. Лимит 2ч (BR-1) для групповых встреч применяется только к primary букеру; secondary не учитываются.
-12. Доп. участникам нужен полный набор полей (имя, email, телефон); хранение — pivot-таблица `booking_participants`.
-13. Первичный букер дублируется в pivot как `role='primary'` + остаётся в `bookings.guest_id` (backward compat).
-14. В `GuestForm` — кнопка «Добавить участника» (до 2 доп. строк); `localStorage` только для primary.
-15. В `BookingResource` — Relation Manager для участников (только чтение) + колонка с количеством.
-16. Отмена групповой брони = отмена для всех участников; pivot cascade-deletes при hard delete.
+1. Миграция `failed_jobs` добавляется в п.4.
+2. `BookingObserver::created` остаётся пустым методом (observer не разрегистрируется).
+3. `opcache.preload` включается в п.1 вместе с JIT.
+4. Поле причины отказа: имя `cancellation_reason`, тип `text`, nullable, `max:1000` на уровне валидации.
+5. Причина отказа видна только администратору (гостю не показываем).
+6. `cancellation_reason` обнуляется при любой смене статуса на не-`cancelled`.
+7. В Filament edit-форме поле `cancellation_reason` только для чтения (`disabled()`).
+8. Поле причины отказа необязательное (nullable) на уровне UI и API.
+9. Групповая встреча: слот занимается 1 раз (одно мероприятие), не по числу участников.
+10. Лимит 2ч (BR-1) для групповых встреч применяется только к primary букеру; secondary не учитываются.
+11. Доп. участникам нужен полный набор полей (имя, email, телефон); хранение — pivot-таблица `booking_participants`.
+12. Первичный букер дублируется в pivot как `role='primary'` + остаётся в `bookings.guest_id` (backward compat).
+13. В `GuestForm` — кнопка «Добавить участника» (до 2 доп. строк); `localStorage` только для primary.
+14. В `BookingResource` — Relation Manager для участников (только чтение) + колонка с количеством.
+15. Отмена групповой брони = отмена для всех участников; pivot cascade-deletes при hard delete.
