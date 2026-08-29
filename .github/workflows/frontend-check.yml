@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-     - cron: "0 2 * * *"
+     - cron: "0 2,13 * * *"
        timezone: "Europe/Moscow"
   workflow_dispatch:
 
@@ -67,7 +67,7 @@ jobs:
 
   lighthouse_schedule:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule'
     permissions:
       id-token: write
       contents: write
