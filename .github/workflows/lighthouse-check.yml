@@ -2,14 +2,14 @@ name: Lighthouse Check
 
 on:
   schedule:
-     - cron: "0 2,14 * * *"
+     - cron: "0 2,15 * * *"
        timezone: "Europe/Moscow"
   workflow_dispatch: 
        
 jobs:
   lighthouse_schedule:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'push'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       id-token: write
       contents: write
