@@ -2,7 +2,7 @@ name: Lighthouse Check
 
 on:
   schedule:
-     - cron: "0 2,15 * * *"
+     - cron: "0 2 * * *"
        timezone: "Europe/Moscow"
   workflow_dispatch: 
        

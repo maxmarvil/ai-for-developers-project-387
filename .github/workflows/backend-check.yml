@@ -8,6 +8,11 @@ on:
 
 jobs:
   backend:
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: read
+      issues: read
     runs-on: ubuntu-latest
 
     defaults:
