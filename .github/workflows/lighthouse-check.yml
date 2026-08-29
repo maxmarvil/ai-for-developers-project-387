@@ -1,9 +1,10 @@
+name: Lighthouse Check
+
 on:
-  push:
-    branches: [main]
   schedule:
      - cron: "0 2,14 * * *"
        timezone: "Europe/Moscow"
+  workflow_dispatch: 
        
 jobs:
   lighthouse_schedule:
