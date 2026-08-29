@@ -7,7 +7,7 @@ on:
     branches: [main]
   schedule:
      - cron: "0 2 * * *"
-     timezone: "Europe/Moscow"
+       timezone: "Europe/Moscow"
 
 jobs:
   frontend:
